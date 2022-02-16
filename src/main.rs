@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Error, Result};
+use anyhow::{Error, Result};
 use json::JsonValue;
 use std::{
     env,
@@ -40,7 +40,10 @@ async fn main() -> Result<()> {
 
     // Get the first batch of user ids, along with the total user count
     let (user_ids, total_users) = alma_client.get_user_ids_and_total_count(options.from_offset, LIMIT).await?;
-    join_handles.push((options.from_offset, tokio::spawn(handle_user_batch(alma_client.clone(), categories_to_remove, user_ids))));
+    join_handles.push((
+        options.from_offset,
+        tokio::spawn(handle_user_batch(alma_client.clone(), categories_to_remove, user_ids)),
+    ));
 
     let last_offset = options.to_offset.min(Some(total_users / LIMIT)).unwrap_or(total_users / LIMIT);
 
@@ -84,22 +87,12 @@ async fn handle_user_batch(
     user_ids: Vec<String>,
 ) -> Result<(), Vec<Error>> {
     let mut errors = Vec::new();
-    let mut join_handles = Vec::new();
     for user_id in user_ids {
-        let alma_client = alma_client.clone();
-        // Spawn a task for each user - may not be necessary or desired
-        join_handles.push(tokio::spawn(async move {
-            alma_client
-                .update_user_details(&user_id, |user| strip_user_statistics_by_category(categories_to_remove, user))
-                .await
-        }));
-    }
-    // Join all the tasks, and collect any errors
-    for join_handle in join_handles {
-        match join_handle.await {
-            Ok(Ok(())) => (),
-            Ok(Err(error)) => errors.push(error),
-            Err(join_error) => errors.push(anyhow!(join_error)),
+        if let Err(error) = alma_client
+            .update_user_details(&user_id, |user| strip_user_statistics_by_category(categories_to_remove, user))
+            .await
+        {
+            errors.push(error.context(format!("error handling user {}", user_id)));
         }
     }
     if errors.is_empty() {
