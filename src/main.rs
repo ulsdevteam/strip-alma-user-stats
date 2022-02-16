@@ -1,18 +1,37 @@
 use anyhow::{anyhow, Error, Result};
 use json::JsonValue;
-use std::env;
+use std::{
+    env,
+    fs::File,
+    io::{BufRead, BufReader},
+    path::PathBuf,
+};
+use structopt::StructOpt;
 
 mod alma;
+
+#[derive(StructOpt)]
+struct Options {
+    #[structopt(short, long, default_value = "0")]
+    from_offset: usize,
+    #[structopt(short, long)]
+    to_offset: Option<usize>,
+    #[structopt(parse(from_os_str))]
+    categories_file: PathBuf,
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
     // Load from .env file if it is present
     dotenv::dotenv().ok();
+    // Get command line arguments
+    let options = Options::from_args();
     // Construct alma client
     let alma_client = alma::Client::new(env::var("ALMA_REGION")?, env::var("ALMA_APIKEY")?);
-    // TODO: pull categories from a file or input
-    let categories_to_remove = vec![String::from("FULL_PART_TIME")];
-    // Leak the list of categories. This ensures that they will not be dropped, and can be referenced from other threads
+    // Pull categories from file
+    let categories_file = File::open(options.categories_file)?;
+    let categories_to_remove: Vec<_> = BufReader::new(categories_file).lines().map(|l| l.unwrap()).collect();
+    // Leak the list of categories. This ensures that they will not be dropped until the program exits, and can be referenced from other threads
     let categories_to_remove = &*Box::leak(categories_to_remove.into_boxed_slice());
     // Alma API page size
     const LIMIT: usize = 100;
@@ -20,11 +39,13 @@ async fn main() -> Result<()> {
     let mut join_handles = Vec::new();
 
     // Get the first batch of user ids, along with the total user count
-    let (user_ids, total_users) = alma_client.get_user_ids_and_total_count(0, LIMIT).await?;
-    join_handles.push((0, tokio::spawn(handle_user_batch(alma_client.clone(), categories_to_remove, user_ids))));
+    let (user_ids, total_users) = alma_client.get_user_ids_and_total_count(options.from_offset, LIMIT).await?;
+    join_handles.push((options.from_offset, tokio::spawn(handle_user_batch(alma_client.clone(), categories_to_remove, user_ids))));
+
+    let last_offset = options.to_offset.min(Some(total_users / LIMIT)).unwrap_or(total_users / LIMIT);
 
     // Split up the rest of the users into batches
-    for offset in 1..(total_users / LIMIT) {
+    for offset in (options.from_offset + 1)..=last_offset {
         let alma_client = alma_client.clone();
         // Spawn a task for each batch
         let join_handle = tokio::spawn(async move {
@@ -36,6 +57,9 @@ async fn main() -> Result<()> {
         });
         join_handles.push((offset, join_handle));
     }
+
+    // Yield to let some tasks run
+    tokio::task::yield_now().await;
 
     for (offset, join_handle) in join_handles {
         // Await each batch, and print any errors
