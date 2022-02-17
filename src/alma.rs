@@ -156,7 +156,7 @@ impl Client {
         // Construct the url for the request
         let mut url = self.data.base_url.join(&format!("users/{}", user_id))?;
         debug!("PUT {}", url);
-        url.query_pairs_mut().append_pair("apikey", &self.data.apikey);        
+        url.query_pairs_mut().append_pair("apikey", &self.data.apikey);
         // Send the updated user
         self.client
             .put(url)

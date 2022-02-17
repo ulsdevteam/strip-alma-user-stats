@@ -107,8 +107,12 @@ async fn handle_user_batch(
     (users_updated, errors)
 }
 
-async fn handle_user(alma_client: &alma::Client, categories_to_remove: &HashSet<String>, user_id: &str) -> Result<bool> {
-    let mut user_details = alma_client.get_user_details(&user_id).await?;
+async fn handle_user(
+    alma_client: &alma::Client,
+    categories_to_remove: &HashSet<String>,
+    user_id: &str,
+) -> Result<bool> {
+    let mut user_details = alma_client.get_user_details(user_id).await?;
     if strip_user_statistics_by_category(categories_to_remove, &mut user_details) {
         alma_client.update_user_details(user_id, user_details).await?;
         Ok(true)
