@@ -1,5 +1,6 @@
 use anyhow::{anyhow, Result};
 use json::JsonValue;
+use log::debug;
 use quick_xml::{events::Event, Reader};
 use std::{str, sync::Arc};
 
@@ -39,6 +40,7 @@ impl Client {
         // Construct the url for the request
         let url =
             self.data.base_url.join(&format!("users?apikey={}&limit={}&offset={}", self.data.apikey, limit, offset))?;
+        debug!("GET {}", url);
         // Send the request, and get the body as a string
         let user_batch_response = self
             .client
@@ -97,6 +99,7 @@ impl Client {
         // Construct the url for the request
         let url =
             self.data.base_url.join(&format!("users?apikey={}&limit={}&offset={}", self.data.apikey, limit, offset))?;
+        debug!("GET {}", url);
         // Send the request, and get the body as a string
         let user_batch_response = self
             .client
@@ -137,6 +140,7 @@ impl Client {
     ) -> Result<()> {
         // Construct the url for the request
         let url = self.data.base_url.join(&format!("users/{}?apikey={}", user_id, self.data.apikey))?;
+        debug!("GET {}", url);
         // Send the request, and get the body as a string
         let user_response = self
             .client
@@ -150,6 +154,7 @@ impl Client {
         let user_json = json::parse(&user_response)?;
         // Pass the user to the callback to update it
         if let Some(updated_user) = update_fn(user_json) {
+            debug!("PUT {}", url);
             // Send the updated user
             self.client
                 .put(url)

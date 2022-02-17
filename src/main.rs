@@ -1,5 +1,6 @@
 use anyhow::{Error, Result};
 use json::JsonValue;
+use log::{error, info};
 use std::{
     env,
     fs::File,
@@ -24,6 +25,8 @@ struct Options {
 async fn main() -> Result<()> {
     // Load from .env file if it is present
     dotenv::dotenv().ok();
+    // Initialize logging
+    env_logger::init();
     // Get command line arguments
     let options = Options::from_args();
     // Construct alma client
@@ -37,20 +40,21 @@ async fn main() -> Result<()> {
     const LIMIT: usize = 100;
     // Each page will get its own concurrent task, handles to which will be collected here with their offset
     let mut join_handles = Vec::new();
-
     // Get the first batch of user ids, along with the total user count
     let (user_ids, total_users) = alma_client.get_user_ids_and_total_count(options.from_offset, LIMIT).await?;
+    // Spawn a task for the first batch
+    info!("Spawning task for batch {}", options.from_offset);
     join_handles.push((
         options.from_offset,
         tokio::spawn(handle_user_batch(alma_client.clone(), categories_to_remove, user_ids)),
     ));
-
-    let last_offset = options.to_offset.min(Some(total_users / LIMIT)).unwrap_or(total_users / LIMIT);
-
+    // Determine the last offset for this run
+    let last_offset = options.to_offset.unwrap_or(total_users / LIMIT).min(total_users / LIMIT);
     // Split up the rest of the users into batches
     for offset in (options.from_offset + 1)..=last_offset {
         let alma_client = alma_client.clone();
         // Spawn a task for each batch
+        info!("Spawning task for batch {}", offset);
         let join_handle = tokio::spawn(async move {
             let user_ids = alma_client
                 .get_user_ids(offset, LIMIT)
@@ -69,12 +73,12 @@ async fn main() -> Result<()> {
         match join_handle.await {
             Ok(Ok(())) => (),
             Ok(Err(errors)) => {
-                eprintln!("Errors in batch {}:", offset);
+                error!("Errors in batch {}:", offset);
                 for error in errors {
-                    eprintln!("    {}", error);
+                    error!("    {}", error);
                 }
             }
-            Err(join_error) => eprintln!("Join error for batch {}: {}", offset, join_error),
+            Err(join_error) => error!("Join error for batch {}: {}", offset, join_error),
         }
     }
 
@@ -117,13 +121,14 @@ fn strip_user_statistics_by_category(categories_to_remove: &[String], mut user: 
         });
         // If the count differs, the user was updated
         if stats_count != user_statistics.len() {
-            return Some(user);
+            Some(user)
         } else {
-            return None;
+            None
         }
+    } else {
+        // User statistics are missing/not an array, so just leave it
+        None
     }
-
-    None
 }
 
 #[cfg(test)]
@@ -213,5 +218,22 @@ mod tests {
             )
             .unwrap()
         );
+    }
+
+    #[tokio::test]
+    async fn test_get_user_ids() {
+        dotenv::dotenv().ok();
+        let alma_client = alma::Client::new(env::var("ALMA_REGION").unwrap(), env::var("ALMA_APIKEY").unwrap());
+        let user_ids = alma_client.get_user_ids(0, 100).await.unwrap();
+        assert_eq!(user_ids.len(), 100);
+    }
+
+    #[tokio::test]
+    async fn test_get_user_ids_and_count() {
+        dotenv::dotenv().ok();
+        let alma_client = alma::Client::new(env::var("ALMA_REGION").unwrap(), env::var("ALMA_APIKEY").unwrap());
+        let (user_ids, total) = alma_client.get_user_ids_and_total_count(0, 100).await.unwrap();
+        assert_eq!(user_ids.len(), 100);
+        assert!(total > 0);
     }
 }
