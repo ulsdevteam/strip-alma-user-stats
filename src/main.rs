@@ -56,11 +56,10 @@ async fn main() -> Result<()> {
         // Spawn a task for each batch
         info!("Spawning task for batch {}", offset);
         let join_handle = tokio::spawn(async move {
-            let user_ids = alma_client
-                .get_user_ids(offset, LIMIT)
-                .await
-                .map_err(|err| vec![err.context(format!("Failed to get user ids for batch {}", offset))])?;
-            handle_user_batch(alma_client, categories_to_remove, user_ids).await
+            match alma_client.get_user_ids(offset, LIMIT).await {
+                Ok(user_ids) => handle_user_batch(alma_client, categories_to_remove, user_ids).await,
+                Err(error) => (0, vec![error.context(format!("Failed to get user ids for batch {}", offset))]),
+            }
         });
         join_handles.push((offset, join_handle));
     }
@@ -71,11 +70,13 @@ async fn main() -> Result<()> {
     for (offset, join_handle) in join_handles {
         // Await each batch, and print any errors
         match join_handle.await {
-            Ok(Ok(())) => (),
-            Ok(Err(errors)) => {
-                error!("Errors in batch {}:", offset);
-                for error in errors {
-                    error!("    {}", error);
+            Ok((users_updated, errors)) => {
+                info!("Batch {}: {} users updated", offset, users_updated);
+                if !errors.is_empty() {
+                    error!("{} errors in batch {}:", errors.len(), offset);
+                    for error in errors {
+                        error!("{}", error);
+                    }
                 }
             }
             Err(join_error) => error!("Join error for batch {}: {}", offset, join_error),
@@ -87,26 +88,32 @@ async fn main() -> Result<()> {
 
 async fn handle_user_batch(
     alma_client: alma::Client,
-    categories_to_remove: &'static [String],
+    categories_to_remove: &[String],
     user_ids: Vec<String>,
-) -> Result<(), Vec<Error>> {
+) -> (usize, Vec<Error>) {
+    let mut users_updated = 0;
     let mut errors = Vec::new();
     for user_id in user_ids {
-        if let Err(error) = alma_client
-            .update_user_details(&user_id, |user| strip_user_statistics_by_category(categories_to_remove, user))
-            .await
-        {
-            errors.push(error.context(format!("error handling user {}", user_id)));
+        match handle_user(&alma_client, categories_to_remove, &user_id).await {
+            Ok(true) => users_updated += 1,
+            Ok(false) => (),
+            Err(error) => errors.push(error.context(format!("error handling user {}", user_id))),
         }
     }
-    if errors.is_empty() {
-        Ok(())
+    (users_updated, errors)
+}
+
+async fn handle_user(alma_client: &alma::Client, categories_to_remove: &[String], user_id: &str) -> Result<bool> {
+    let mut user_details = alma_client.get_user_details(&user_id).await?;
+    if strip_user_statistics_by_category(categories_to_remove, &mut user_details) {
+        alma_client.update_user_details(user_id, user_details).await?;
+        Ok(true)
     } else {
-        Err(errors)
+        Ok(false)
     }
 }
 
-fn strip_user_statistics_by_category(categories_to_remove: &[String], mut user: JsonValue) -> Option<JsonValue> {
+fn strip_user_statistics_by_category(categories_to_remove: &[String], user: &mut JsonValue) -> bool {
     if let JsonValue::Array(user_statistics) = &mut user["user_statistic"] {
         let stats_count = user_statistics.len();
         // Remove the categories
@@ -121,14 +128,10 @@ fn strip_user_statistics_by_category(categories_to_remove: &[String], mut user: 
         });
         // If the count differs, the user was updated
         if stats_count != user_statistics.len() {
-            Some(user)
-        } else {
-            None
+            return true;
         }
-    } else {
-        // User statistics are missing/not an array, so just leave it
-        None
     }
+    false
 }
 
 #[cfg(test)]
@@ -137,7 +140,7 @@ mod tests {
 
     #[test]
     fn test_json_strip_fn() {
-        let user_json = json::parse(
+        let mut user_json = json::parse(
             r#"
         {
             "user_statistic": [
@@ -182,9 +185,10 @@ mod tests {
         )
         .unwrap();
 
-        let updated = strip_user_statistics_by_category(&[String::from("FULL_PART_TIME")], user_json).unwrap();
+        let updated = strip_user_statistics_by_category(&[String::from("FULL_PART_TIME")], &mut user_json);
+        assert!(updated);
         assert_eq!(
-            updated,
+            user_json,
             json::parse(
                 r#"
             {

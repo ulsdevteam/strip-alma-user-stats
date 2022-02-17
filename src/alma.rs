@@ -131,13 +131,8 @@ impl Client {
         }
     }
 
-    /// Get the user details, then parse it into a json object and send it to a callback to be updated.
-    /// If the callback returns `Some`, update the user with the new json.
-    pub async fn update_user_details(
-        &self,
-        user_id: &str,
-        update_fn: impl FnOnce(JsonValue) -> Option<JsonValue>,
-    ) -> Result<()> {
+    /// Get a user's details as a JSON object
+    pub async fn get_user_details(&self, user_id: &str) -> Result<JsonValue> {
         // Construct the url for the request
         let url = self.data.base_url.join(&format!("users/{}?apikey={}", user_id, self.data.apikey))?;
         debug!("GET {}", url);
@@ -151,19 +146,23 @@ impl Client {
             .error_for_status()?
             .text()
             .await?;
-        let user_json = json::parse(&user_response)?;
-        // Pass the user to the callback to update it
-        if let Some(updated_user) = update_fn(user_json) {
-            debug!("PUT {}", url);
-            // Send the updated user
-            self.client
-                .put(url)
-                .body(updated_user.dump())
-                .header(reqwest::header::CONTENT_TYPE, "application/json")
-                .send()
-                .await?
-                .error_for_status()?;
-        }
+        // Parse the body into a json object and return
+        Ok(json::parse(&user_response)?)
+    }
+
+    /// Update a user's details with a PUT request
+    pub async fn update_user_details(&self, user_id: &str, user_details: JsonValue) -> Result<()> {
+        // Construct the url for the request
+        let url = self.data.base_url.join(&format!("users/{}?apikey={}", user_id, self.data.apikey))?;
+        debug!("PUT {}", url);
+        // Send the updated user
+        self.client
+            .put(url)
+            .body(user_details.dump())
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .send()
+            .await?
+            .error_for_status()?;
         Ok(())
     }
 }
