@@ -1,8 +1,9 @@
 use anyhow::{anyhow, Result};
+use governor::{Jitter, Quota};
 use json::JsonValue;
 use log::debug;
 use quick_xml::{events::Event, Reader};
-use std::{str, sync::Arc};
+use std::{num::NonZeroU32, str, sync::Arc, time::Duration};
 
 /// Client object for making Alma API calls. Uses `Arc` internally to be cheaply cloneable.
 #[derive(Clone)]
@@ -14,13 +15,23 @@ pub struct Client {
 struct ClientData {
     base_url: reqwest::Url,
     apikey: String,
+    rate_limiter: RateLimiter,
 }
+
+type RateLimiter = governor::RateLimiter<
+    governor::state::NotKeyed,
+    governor::state::InMemoryState,
+    governor::clock::QuantaClock,
+    governor::middleware::NoOpMiddleware<governor::clock::QuantaInstant>,
+>;
 
 impl ClientData {
     pub fn new(region: impl Into<String>, apikey: impl Into<String>) -> Arc<Self> {
+        let rate_limiter = RateLimiter::direct(Quota::per_second(NonZeroU32::new(10).unwrap()));
         Arc::new(Self {
             base_url: format!("https://api-{}.hosted.exlibrisgroup.com/almaws/v1/", region.into()).parse().unwrap(),
             apikey: apikey.into(),
+            rate_limiter,
         })
     }
 }
@@ -34,11 +45,18 @@ impl Client {
         }
     }
 
+    async fn until_ready(&self) {
+        let jitter = Jitter::up_to(Duration::from_millis(75));
+        self.data.rate_limiter.until_ready_with_jitter(jitter).await;
+    }
+
     /// Given an offset and limit, make a GET request to the `/users` endpoint,
     /// then pull out user ids and the total record count from the xml response body.
     pub async fn get_user_ids_and_total_count(&self, offset: usize, limit: usize) -> Result<(Vec<String>, usize)> {
+        self.until_ready().await;
         // Construct the url for the request
-        let mut url = self.data.base_url.join(&format!("users?order_by=primary_id&limit={}&offset={}", limit, offset))?;
+        let mut url =
+            self.data.base_url.join(&format!("users?order_by=primary_id&limit={}&offset={}", limit, offset))?;
         debug!("GET {}", url);
         url.query_pairs_mut().append_pair("apikey", &self.data.apikey);
         // Send the request, and get the body as a string
@@ -96,8 +114,10 @@ impl Client {
     /// Given an offset and limit, make a GET request to the `/users` endpoint,
     /// then pull out user ids from the xml response body.
     pub async fn get_user_ids(&self, offset: usize, limit: usize) -> Result<Vec<String>> {
+        self.until_ready().await;
         // Construct the url for the request
-        let mut url = self.data.base_url.join(&format!("users?order_by=primary_id&limit={}&offset={}", limit, offset))?;
+        let mut url =
+            self.data.base_url.join(&format!("users?order_by=primary_id&limit={}&offset={}", limit, offset))?;
         debug!("GET {}", url);
         url.query_pairs_mut().append_pair("apikey", &self.data.apikey);
         // Send the request, and get the body as a string
@@ -133,6 +153,7 @@ impl Client {
 
     /// Get a user's details as a JSON object
     pub async fn get_user_details(&self, user_id: &str) -> Result<JsonValue> {
+        self.until_ready().await;
         // Construct the url for the request
         let mut url = self.data.base_url.join(&format!("users/{}", user_id))?;
         debug!("GET {}", url);
@@ -153,6 +174,7 @@ impl Client {
 
     /// Update a user's details with a PUT request
     pub async fn update_user_details(&self, user_id: &str, user_details: JsonValue) -> Result<()> {
+        self.until_ready().await;
         // Construct the url for the request
         let mut url = self.data.base_url.join(&format!("users/{}", user_id))?;
         debug!("PUT {}", url);
