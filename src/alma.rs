@@ -140,7 +140,7 @@ impl Client {
         // Send the request, and get the body as a string
         let user_response = self
             .client
-            .get(url.clone())
+            .get(url)
             .header(reqwest::header::ACCEPT, "application/json")
             .send()
             .await?
