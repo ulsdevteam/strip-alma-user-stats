@@ -38,9 +38,9 @@ impl Client {
     /// then pull out user ids and the total record count from the xml response body.
     pub async fn get_user_ids_and_total_count(&self, offset: usize, limit: usize) -> Result<(Vec<String>, usize)> {
         // Construct the url for the request
-        let url =
-            self.data.base_url.join(&format!("users?apikey={}&limit={}&offset={}", self.data.apikey, limit, offset))?;
+        let mut url = self.data.base_url.join(&format!("users?limit={}&offset={}", limit, offset))?;
         debug!("GET {}", url);
+        url.query_pairs_mut().append_pair("apikey", &self.data.apikey);
         // Send the request, and get the body as a string
         let user_batch_response = self
             .client
@@ -97,9 +97,9 @@ impl Client {
     /// then pull out user ids from the xml response body.
     pub async fn get_user_ids(&self, offset: usize, limit: usize) -> Result<Vec<String>> {
         // Construct the url for the request
-        let url =
-            self.data.base_url.join(&format!("users?apikey={}&limit={}&offset={}", self.data.apikey, limit, offset))?;
+        let mut url = self.data.base_url.join(&format!("users?limit={}&offset={}", limit, offset))?;
         debug!("GET {}", url);
+        url.query_pairs_mut().append_pair("apikey", &self.data.apikey);
         // Send the request, and get the body as a string
         let user_batch_response = self
             .client
@@ -134,8 +134,9 @@ impl Client {
     /// Get a user's details as a JSON object
     pub async fn get_user_details(&self, user_id: &str) -> Result<JsonValue> {
         // Construct the url for the request
-        let url = self.data.base_url.join(&format!("users/{}?apikey={}", user_id, self.data.apikey))?;
+        let mut url = self.data.base_url.join(&format!("users/{}", user_id))?;
         debug!("GET {}", url);
+        url.query_pairs_mut().append_pair("apikey", &self.data.apikey);
         // Send the request, and get the body as a string
         let user_response = self
             .client
@@ -153,8 +154,9 @@ impl Client {
     /// Update a user's details with a PUT request
     pub async fn update_user_details(&self, user_id: &str, user_details: JsonValue) -> Result<()> {
         // Construct the url for the request
-        let url = self.data.base_url.join(&format!("users/{}?apikey={}", user_id, self.data.apikey))?;
+        let mut url = self.data.base_url.join(&format!("users/{}", user_id))?;
         debug!("PUT {}", url);
+        url.query_pairs_mut().append_pair("apikey", &self.data.apikey);        
         // Send the updated user
         self.client
             .put(url)
