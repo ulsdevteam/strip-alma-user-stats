@@ -2,10 +2,12 @@ use anyhow::{Error, Result};
 use json::JsonValue;
 use log::{error, info};
 use std::{
+    collections::HashSet,
     env,
     fs::File,
     io::{BufRead, BufReader},
     path::PathBuf,
+    sync::Arc,
 };
 use structopt::StructOpt;
 
@@ -33,9 +35,10 @@ async fn main() -> Result<()> {
     let alma_client = alma::Client::new(env::var("ALMA_REGION")?, env::var("ALMA_APIKEY")?);
     // Pull categories from file
     let categories_file = File::open(options.categories_file)?;
-    let categories_to_remove: Vec<_> = BufReader::new(categories_file).lines().map(|l| l.unwrap()).collect();
-    // Leak the list of categories. This ensures that they will not be dropped until the program exits, and can be referenced from other threads
-    let categories_to_remove = &*Box::leak(categories_to_remove.into_boxed_slice());
+    // Get each line of the file as a string and collect into HashSet
+    let categories_to_remove: HashSet<_> = BufReader::new(categories_file).lines().map(|l| l.unwrap()).collect();
+    // Use an Arc (Atomic Reference Counted smart pointer) to share categories set between threads
+    let categories_to_remove = Arc::new(categories_to_remove);
     // Alma API page size
     const LIMIT: usize = 100;
     // Each page will get its own concurrent task, handles to which will be collected here with their offset
@@ -46,13 +49,14 @@ async fn main() -> Result<()> {
     info!("Spawning task for batch {}", options.from_offset);
     join_handles.push((
         options.from_offset,
-        tokio::spawn(handle_user_batch(alma_client.clone(), categories_to_remove, user_ids)),
+        tokio::spawn(handle_user_batch(alma_client.clone(), categories_to_remove.clone(), user_ids)),
     ));
     // Determine the last offset for this run
     let last_offset = options.to_offset.unwrap_or(total_users / LIMIT).min(total_users / LIMIT);
     // Split up the rest of the users into batches
     for offset in (options.from_offset + 1)..=last_offset {
         let alma_client = alma_client.clone();
+        let categories_to_remove = categories_to_remove.clone();
         // Spawn a task for each batch
         info!("Spawning task for batch {}", offset);
         let join_handle = tokio::spawn(async move {
@@ -88,13 +92,13 @@ async fn main() -> Result<()> {
 
 async fn handle_user_batch(
     alma_client: alma::Client,
-    categories_to_remove: &[String],
+    categories_to_remove: Arc<HashSet<String>>,
     user_ids: Vec<String>,
 ) -> (usize, Vec<Error>) {
     let mut users_updated = 0;
     let mut errors = Vec::new();
     for user_id in user_ids {
-        match handle_user(&alma_client, categories_to_remove, &user_id).await {
+        match handle_user(&alma_client, &*categories_to_remove, &user_id).await {
             Ok(true) => users_updated += 1,
             Ok(false) => (),
             Err(error) => errors.push(error.context(format!("error handling user {}", user_id))),
@@ -103,7 +107,7 @@ async fn handle_user_batch(
     (users_updated, errors)
 }
 
-async fn handle_user(alma_client: &alma::Client, categories_to_remove: &[String], user_id: &str) -> Result<bool> {
+async fn handle_user(alma_client: &alma::Client, categories_to_remove: &HashSet<String>, user_id: &str) -> Result<bool> {
     let mut user_details = alma_client.get_user_details(&user_id).await?;
     if strip_user_statistics_by_category(categories_to_remove, &mut user_details) {
         alma_client.update_user_details(user_id, user_details).await?;
@@ -113,14 +117,14 @@ async fn handle_user(alma_client: &alma::Client, categories_to_remove: &[String]
     }
 }
 
-fn strip_user_statistics_by_category(categories_to_remove: &[String], user: &mut JsonValue) -> bool {
+fn strip_user_statistics_by_category(categories_to_remove: &HashSet<String>, user: &mut JsonValue) -> bool {
     if let JsonValue::Array(user_statistics) = &mut user["user_statistic"] {
         let stats_count = user_statistics.len();
         // Remove the categories
         user_statistics.retain(|statistic| {
             if let Some(category) = statistic["category_type"]["value"].as_str() {
                 // Retain if this category is not in the list
-                categories_to_remove.iter().all(|c| c != category)
+                !categories_to_remove.contains(category)
             } else {
                 // If the category type is not present for some reason, just leave it as is
                 true
@@ -137,6 +141,7 @@ fn strip_user_statistics_by_category(categories_to_remove: &[String], user: &mut
 #[cfg(test)]
 mod tests {
     use super::*;
+    use maplit::hashset;
 
     #[test]
     fn test_json_strip_fn() {
@@ -184,8 +189,8 @@ mod tests {
         }"#,
         )
         .unwrap();
-
-        let updated = strip_user_statistics_by_category(&[String::from("FULL_PART_TIME")], &mut user_json);
+        let categories = hashset![String::from("FULL_PART_TIME")];
+        let updated = strip_user_statistics_by_category(&categories, &mut user_json);
         assert!(updated);
         assert_eq!(
             user_json,
@@ -225,7 +230,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_get_user_ids() {
+    async fn test_get_user_ids_api() {
         dotenv::dotenv().ok();
         let alma_client = alma::Client::new(env::var("ALMA_REGION").unwrap(), env::var("ALMA_APIKEY").unwrap());
         let user_ids = alma_client.get_user_ids(0, 100).await.unwrap();
@@ -233,7 +238,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_get_user_ids_and_count() {
+    async fn test_get_user_ids_and_count_api() {
         dotenv::dotenv().ok();
         let alma_client = alma::Client::new(env::var("ALMA_REGION").unwrap(), env::var("ALMA_APIKEY").unwrap());
         let (user_ids, total) = alma_client.get_user_ids_and_total_count(0, 100).await.unwrap();
