@@ -38,7 +38,7 @@ impl Client {
     /// then pull out user ids and the total record count from the xml response body.
     pub async fn get_user_ids_and_total_count(&self, offset: usize, limit: usize) -> Result<(Vec<String>, usize)> {
         // Construct the url for the request
-        let mut url = self.data.base_url.join(&format!("users?limit={}&offset={}", limit, offset))?;
+        let mut url = self.data.base_url.join(&format!("users?order_by=primary_id&limit={}&offset={}", limit, offset))?;
         debug!("GET {}", url);
         url.query_pairs_mut().append_pair("apikey", &self.data.apikey);
         // Send the request, and get the body as a string
@@ -97,7 +97,7 @@ impl Client {
     /// then pull out user ids from the xml response body.
     pub async fn get_user_ids(&self, offset: usize, limit: usize) -> Result<Vec<String>> {
         // Construct the url for the request
-        let mut url = self.data.base_url.join(&format!("users?limit={}&offset={}", limit, offset))?;
+        let mut url = self.data.base_url.join(&format!("users?order_by=primary_id&limit={}&offset={}", limit, offset))?;
         debug!("GET {}", url);
         url.query_pairs_mut().append_pair("apikey", &self.data.apikey);
         // Send the request, and get the body as a string
