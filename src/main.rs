@@ -1,6 +1,6 @@
-use anyhow::{Error, Result};
+use anyhow::Result;
 use json::JsonValue;
-use log::{error, info};
+use log::{error, info, warn};
 use std::{
     collections::HashSet,
     env,
@@ -39,12 +39,13 @@ async fn main() -> Result<()> {
     let categories_to_remove: HashSet<_> = BufReader::new(categories_file).lines().map(|l| l.unwrap()).collect();
     // Use an Arc (Atomic Reference Counted smart pointer) to share categories set between threads
     let categories_to_remove = Arc::new(categories_to_remove);
+
     // Alma API page size
     const LIMIT: usize = 100;
     // Each page will get its own concurrent task, handles to which will be collected here with their offset
     let mut join_handles = Vec::new();
     // Get the first batch of user ids, along with the total user count
-    let (user_ids, total_users) = alma_client.get_user_ids_and_total_count(options.from_offset, LIMIT).await?;
+    let (user_ids, total_users) = alma_client.get_user_ids_and_total_count(options.from_offset * LIMIT, LIMIT).await?;
     // Spawn a task for the first batch
     info!("Spawning task for batch {}", options.from_offset);
     join_handles.push((
@@ -60,9 +61,12 @@ async fn main() -> Result<()> {
         // Spawn a task for each batch
         info!("Spawning task for batch {}", offset);
         let join_handle = tokio::spawn(async move {
-            match alma_client.get_user_ids(offset, LIMIT).await {
+            match alma_client.get_user_ids(offset * LIMIT, LIMIT).await {
                 Ok(user_ids) => handle_user_batch(alma_client, categories_to_remove, user_ids).await,
-                Err(error) => (0, vec![error.context(format!("Failed to get user ids for batch {}", offset))]),
+                Err(error) => {
+                    error!("Failed to get user ids for batch {}: {:#}", offset, error);
+                    (0, 0)
+                }
             }
         });
         join_handles.push((offset, join_handle));
@@ -75,13 +79,7 @@ async fn main() -> Result<()> {
         // Await each batch, and print any errors
         match join_handle.await {
             Ok((users_updated, errors)) => {
-                info!("Batch {}: {} users updated", offset, users_updated);
-                if !errors.is_empty() {
-                    error!("{} errors in batch {}:", errors.len(), offset);
-                    for error in errors {
-                        error!("{}", error);
-                    }
-                }
+                info!("Batch {}: {} users updated. {} errors.", offset, users_updated, errors);
             }
             Err(join_error) => error!("Join error for batch {}: {}", offset, join_error),
         }
@@ -94,14 +92,17 @@ async fn handle_user_batch(
     alma_client: alma::Client,
     categories_to_remove: Arc<HashSet<String>>,
     user_ids: Vec<String>,
-) -> (usize, Vec<Error>) {
+) -> (usize, usize) {
     let mut users_updated = 0;
-    let mut errors = Vec::new();
+    let mut errors = 0;
     for user_id in user_ids {
         match handle_user(&alma_client, &*categories_to_remove, &user_id).await {
             Ok(true) => users_updated += 1,
             Ok(false) => (),
-            Err(error) => errors.push(error.context(format!("error handling user {}", user_id))),
+            Err(error) => {
+                errors += 1;
+                error!("user {}: {:#}", user_id, error);
+            }
         }
     }
     (users_updated, errors)
@@ -113,7 +114,7 @@ async fn handle_user(
     user_id: &str,
 ) -> Result<bool> {
     let mut user_details = alma_client.get_user_details(user_id).await?;
-    if strip_user_statistics_by_category(categories_to_remove, &mut user_details) {
+    if strip_user_statistics_by_category(user_id, categories_to_remove, &mut user_details) {
         alma_client.update_user_details(user_id, user_details).await?;
         Ok(true)
     } else {
@@ -121,11 +122,15 @@ async fn handle_user(
     }
 }
 
-fn strip_user_statistics_by_category(categories_to_remove: &HashSet<String>, user: &mut JsonValue) -> bool {
+
+fn strip_user_statistics_by_category(user_id: &str, categories_to_remove: &HashSet<String>, user: &mut JsonValue) -> bool {
     if let JsonValue::Array(user_statistics) = &mut user["user_statistic"] {
         let stats_count = user_statistics.len();
         // Remove the categories
         user_statistics.retain(|statistic| {
+            if let Some("Internal") = statistic["segment_type"].as_str() {
+                warn!("user {} has internal statistic: {}", user_id, statistic);
+            }
             if let Some(category) = statistic["category_type"]["value"].as_str() {
                 // Retain if this category is not in the list
                 !categories_to_remove.contains(category)
@@ -135,9 +140,7 @@ fn strip_user_statistics_by_category(categories_to_remove: &HashSet<String>, use
             }
         });
         // If the count differs, the user was updated
-        if stats_count != user_statistics.len() {
-            return true;
-        }
+        return stats_count != user_statistics.len()
     }
     false
 }
@@ -194,7 +197,7 @@ mod tests {
         )
         .unwrap();
         let categories = hashset![String::from("FULL_PART_TIME")];
-        let updated = strip_user_statistics_by_category(&categories, &mut user_json);
+        let updated = strip_user_statistics_by_category("test", &categories, &mut user_json);
         assert!(updated);
         assert_eq!(
             user_json,
