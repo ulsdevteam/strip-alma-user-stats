@@ -3,7 +3,9 @@ use governor::{Jitter, Quota};
 use json::JsonValue;
 use log::debug;
 use quick_xml::{events::Event, Reader};
-use std::{num::NonZeroU32, str, sync::Arc, time::Duration};
+use reqwest::{Response, StatusCode};
+use std::{fmt, num::NonZeroU32, str, sync::Arc, time::Duration};
+use thiserror::Error;
 
 /// Client object for making Alma API calls. Uses `Arc` internally to be cheaply cloneable.
 #[derive(Clone)]
@@ -16,6 +18,27 @@ struct ClientData {
     base_url: reqwest::Url,
     apikey: String,
     rate_limiter: RateLimiter,
+}
+
+#[derive(Debug, Error)]
+#[error("Alma API error:\n Status: {status_code}\n Error Code: {error_code}\n Error Message: {error_message}")]
+pub struct AlmaError {
+    status_code: StatusCode,
+    error_code: String,
+    error_message: String,
+    tracking_id: String,
+}
+
+#[derive(Debug, Error)]
+pub struct AlmaErrors(Vec<AlmaError>);
+
+impl fmt::Display for AlmaErrors {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for error in &self.0 {
+            writeln!(f, "{}", error)?;
+        }
+        Ok(())
+    }
 }
 
 type RateLimiter = governor::RateLimiter<
@@ -60,15 +83,11 @@ impl Client {
         debug!("GET {}", url);
         url.query_pairs_mut().append_pair("apikey", &self.data.apikey);
         // Send the request, and get the body as a string
-        let user_batch_response = self
-            .client
-            .get(url)
-            .header(reqwest::header::ACCEPT, "application/xml")
-            .send()
-            .await?
-            .error_for_status()?
-            .text()
-            .await?;
+        let user_batch_response =
+            check_error(self.client.get(url).header(reqwest::header::ACCEPT, "application/xml").send().await?)
+                .await?
+                .text()
+                .await?;
         // Variables to hold the results
         let mut user_ids = Vec::with_capacity(limit);
         let mut total_record_count: Option<usize> = None;
@@ -121,15 +140,11 @@ impl Client {
         debug!("GET {}", url);
         url.query_pairs_mut().append_pair("apikey", &self.data.apikey);
         // Send the request, and get the body as a string
-        let user_batch_response = self
-            .client
-            .get(url)
-            .header(reqwest::header::ACCEPT, "application/xml")
-            .send()
-            .await?
-            .error_for_status()?
-            .text()
-            .await?;
+        let user_batch_response =
+            check_error(self.client.get(url).header(reqwest::header::ACCEPT, "application/xml").send().await?)
+                .await?
+                .text()
+                .await?;
         // A vector to hold the results
         let mut user_ids = Vec::with_capacity(limit);
         // Xml reader, and a buffer for it to use
@@ -159,15 +174,11 @@ impl Client {
         debug!("GET {}", url);
         url.query_pairs_mut().append_pair("apikey", &self.data.apikey);
         // Send the request, and get the body as a string
-        let user_response = self
-            .client
-            .get(url)
-            .header(reqwest::header::ACCEPT, "application/json")
-            .send()
-            .await?
-            .error_for_status()?
-            .text()
-            .await?;
+        let user_response =
+            check_error(self.client.get(url).header(reqwest::header::ACCEPT, "application/json").send().await?)
+                .await?
+                .text()
+                .await?;
         // Parse the body into a json object and return
         Ok(json::parse(&user_response)?)
     }
@@ -180,13 +191,90 @@ impl Client {
         debug!("PUT {}", url);
         url.query_pairs_mut().append_pair("apikey", &self.data.apikey);
         // Send the updated user
-        self.client
-            .put(url)
-            .body(user_details.dump())
-            .header(reqwest::header::CONTENT_TYPE, "application/json")
-            .send()
-            .await?
-            .error_for_status()?;
+        check_error(
+            self.client
+                .put(url)
+                .body(user_details.dump())
+                .header(reqwest::header::CONTENT_TYPE, "application/json")
+                .send()
+                .await?,
+        )
+        .await?;
         Ok(())
+    }
+}
+
+async fn check_error(response: Response) -> Result<Response> {
+    let status_code = response.status();
+    if status_code.is_client_error() || status_code.is_server_error() {
+        let content_type = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|h| h.to_str().ok())
+            .ok_or_else(|| anyhow!("Alma API error {} with missing content type", status_code))?;
+        match content_type.split(';').next().unwrap() {
+            "application/xml" => {
+                let body = response.text().await?;
+                let mut xml_reader = Reader::from_str(&body);
+                let mut xml_buf = Vec::new();
+                let mut alma_errors = Vec::new();
+                loop {
+                    // Read an xml element into the buffer
+                    let event = xml_reader.read_event(&mut xml_buf)?;
+                    match event {
+                        Event::Start(e) => match e.name() {
+                            b"error" => alma_errors.push(AlmaError {
+                                status_code,
+                                error_code: String::new(),
+                                error_message: String::new(),
+                                tracking_id: String::new(),
+                            }),
+                            b"errorCode" => {
+                                drop(e);
+                                alma_errors.last_mut().unwrap().error_code =
+                                    xml_reader.read_text(b"errorCode", &mut xml_buf)?;
+                            }
+                            b"errorMessage" => {
+                                drop(e);
+                                alma_errors.last_mut().unwrap().error_message =
+                                    xml_reader.read_text(b"errorMessage", &mut xml_buf)?;
+                            }
+                            b"trackingId" => {
+                                drop(e);
+                                alma_errors.last_mut().unwrap().tracking_id =
+                                    xml_reader.read_text(b"trackingId", &mut xml_buf)?;
+                            }
+                            _ => {}
+                        },
+                        Event::Eof => return Err(anyhow!(AlmaErrors(alma_errors))),
+                        _ => {}
+                    }
+                    xml_buf.clear();
+                }
+            }
+            "application/json" => {
+                let body = json::parse(&response.text().await?)?;
+                if let JsonValue::Object(error_list) = &body["errorList"] {
+                    return Err(anyhow!(AlmaErrors(
+                        error_list
+                            .iter()
+                            .map(|(_, error)| {
+                                AlmaError {
+                                    status_code,
+                                    error_code: error["errorCode"].to_string(),
+                                    error_message: error["errorMessage"].to_string(),
+                                    tracking_id: error["trackingId"].to_string(),
+                                }
+                            })
+                            .collect()
+                    )));
+                } else {
+                    return Err(anyhow!("Alma API error {}, couldn't parse error message from json body", status_code));
+                }
+            }
+            _ => return Err(anyhow!("Alma API error {} with unexpected content type {}", status_code, content_type)),
+        }
+    } else {
+        Ok(response)
     }
 }
