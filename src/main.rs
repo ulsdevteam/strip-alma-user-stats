@@ -122,9 +122,12 @@ async fn handle_user(
     }
 }
 
-
-fn strip_user_statistics_by_category(user_id: &str, categories_to_remove: &HashSet<String>, user: &mut JsonValue) -> bool {
-    if let JsonValue::Array(user_statistics) = &mut user["user_statistic"] {
+fn strip_user_statistics_by_category(
+    user_id: &str,
+    categories_to_remove: &HashSet<String>,
+    user_details: &mut JsonValue,
+) -> bool {
+    if let JsonValue::Array(user_statistics) = &mut user_details["user_statistic"] {
         let stats_count = user_statistics.len();
         // Remove the categories
         user_statistics.retain(|statistic| {
@@ -140,9 +143,10 @@ fn strip_user_statistics_by_category(user_id: &str, categories_to_remove: &HashS
             }
         });
         // If the count differs, the user was updated
-        return stats_count != user_statistics.len()
+        stats_count != user_statistics.len()
+    } else {
+        false
     }
-    false
 }
 
 #[cfg(test)]

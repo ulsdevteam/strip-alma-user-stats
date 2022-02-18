@@ -20,27 +20,6 @@ struct ClientData {
     rate_limiter: RateLimiter,
 }
 
-#[derive(Debug, Error)]
-#[error("Alma API error:\n Status: {status_code}\n Error Code: {error_code}\n Error Message: {error_message}")]
-pub struct AlmaError {
-    status_code: StatusCode,
-    error_code: String,
-    error_message: String,
-    tracking_id: String,
-}
-
-#[derive(Debug, Error)]
-pub struct AlmaErrors(Vec<AlmaError>);
-
-impl fmt::Display for AlmaErrors {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        for error in &self.0 {
-            writeln!(f, "{}", error)?;
-        }
-        Ok(())
-    }
-}
-
 type RateLimiter = governor::RateLimiter<
     governor::state::NotKeyed,
     governor::state::InMemoryState,
@@ -200,6 +179,27 @@ impl Client {
                 .await?,
         )
         .await?;
+        Ok(())
+    }
+}
+
+#[derive(Debug, Error)]
+#[error("Alma API error:\n Status: {status_code}\n Error Code: {error_code}\n Error Message: {error_message}")]
+pub struct AlmaError {
+    status_code: StatusCode,
+    error_code: String,
+    error_message: String,
+    tracking_id: String,
+}
+
+#[derive(Debug, Error)]
+pub struct AlmaErrors(Vec<AlmaError>);
+
+impl fmt::Display for AlmaErrors {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for error in &self.0 {
+            writeln!(f, "{}", error)?;
+        }
         Ok(())
     }
 }
