@@ -4,8 +4,9 @@ use json::JsonValue;
 use log::debug;
 use quick_xml::{events::Event, Reader};
 use reqwest::{Response, StatusCode};
-use std::{fmt, num::NonZeroU32, str, sync::Arc, time::Duration};
+use std::{cell::RefCell, collections::HashMap, fmt, num::NonZeroU32, str, sync::Arc, time::Duration};
 use thiserror::Error;
+use tokio::sync::{Mutex, RwLock};
 
 /// Client object for making Alma API calls. Uses `Arc` internally to be cheaply cloneable.
 #[derive(Clone)]
@@ -18,6 +19,7 @@ struct ClientData {
     base_url: reqwest::Url,
     apikey: String,
     rate_limiter: RateLimiter,
+    code_table_cache: Mutex<RefCell<HashMap<String, Vec<String>>>>,
 }
 
 type RateLimiter = governor::RateLimiter<
@@ -34,6 +36,7 @@ impl ClientData {
             base_url: format!("https://api-{}.hosted.exlibrisgroup.com/almaws/v1/", region.into()).parse().unwrap(),
             apikey: apikey.into(),
             rate_limiter,
+            code_table_cache: Mutex::new(RefCell::new(HashMap::new())),
         })
     }
 }
@@ -180,6 +183,31 @@ impl Client {
         )
         .await?;
         Ok(())
+    }
+
+    pub async fn get_code_table(&self, code_table_name: &str) -> Result<Vec<String>> {
+        let cache = self.data.code_table_cache.lock().await;
+        let cached_codes = cache.borrow().get(code_table_name).cloned();
+        if let Some(codes) = cached_codes {
+            Ok(codes)
+        } else {
+            self.until_ready().await;
+            let mut url = self.data.base_url.join(&format!("/conf/code-tables/{}", code_table_name))?;
+            debug!("GET {}", url);
+            url.query_pairs_mut().append_pair("apikey", &self.data.apikey);
+            let response_body =
+                check_error(self.client.get(url).header(reqwest::header::ACCEPT, "application/json").send().await?)
+                    .await?
+                    .text()
+                    .await?;
+            let codes: Vec<_> = json::parse(&response_body)?["row"]
+                .members()
+                .filter_map(|r| r["code"].as_str())
+                .map(|c| c.to_owned())
+                .collect();
+            cache.borrow_mut().insert(code_table_name.to_owned(), codes.clone());
+            Ok(codes)
+        }
     }
 }
 
