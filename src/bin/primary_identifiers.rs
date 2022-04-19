@@ -29,7 +29,7 @@ fn main() -> Result<()> {
 
     for entry in read_dir("users")? {
         if let Err(error) = entry.context("error reading file").and_then(&mut process_file) {
-            eprintln!("error processing file: {}", error);
+            eprintln!("error processing file: {:#}", error);
         }
     }
 
