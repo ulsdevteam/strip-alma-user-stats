@@ -14,10 +14,10 @@ fn main() -> Result<()> {
     let mut internal_stats_users = HashSet::new();
     let mut title_errors = 0;
     let mut identifier_errors = 0;
-    let batch_regex = Regex::new(r#"Batch \d+: (\d+) users updated\. (\d+) errors\.$"#)?;
-    let internal_stat_regex = Regex::new(r#"user (.+) has internal statistic: (.+)$"#)?;
-    let title_error_regex = Regex::new(r#"Error Message: Given user title is not legal"#)?;
-    let identifier_error_regex = Regex::new(r#"Error Message: (User with i|I)dentifier"#)?;
+    let batch_regex = Regex::new(r"Batch \d+: (\d+) users updated\. (\d+) errors\.$")?;
+    let internal_stat_regex = Regex::new(r"user (.+) has internal statistic: (.+)$")?;
+    let title_error_regex = Regex::new(r"Error Message: Given user title is not legal")?;
+    let identifier_error_regex = Regex::new(r"Error Message: (User with i|I)dentifier")?;
     for path in std::env::args().skip(1) {
         let file = BufReader::new(File::open(path)?);
         for line in file.lines().flatten() {

@@ -11,8 +11,8 @@ use std::{
 async fn main() -> Result<()> {
     dotenv::dotenv().ok();
     let alma_client = alma::Client::new(env::var("ALMA_REGION")?, env::var("ALMA_APIKEY")?);
-    let error_regex = Regex::new(r#"user (.+): Alma API error:"#)?;
-    let identifier_error_regex = Regex::new(r#"Error Message: ((User with i|I)dentifier.*)$"#)?;
+    let error_regex = Regex::new(r"user (.+): Alma API error:")?;
+    let identifier_error_regex = Regex::new(r"Error Message: ((User with i|I)dentifier.*)$")?;
     for path in std::env::args().skip(1) {
         let file = File::open(path)?;
         let mut lines = BufReader::new(file).lines();
