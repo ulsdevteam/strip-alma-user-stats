@@ -6,6 +6,7 @@ use std::{
     io::{BufRead, BufReader},
 };
 
+/// Takes in the log output from the main program (bin.rs)
 fn main() -> Result<()> {
     let mut updated = 0;
     let mut errors = 0;
@@ -26,11 +27,9 @@ fn main() -> Result<()> {
             } else if let Some(captures) = internal_stat_regex.captures(&line) {
                 internal_stats += 1;
                 internal_stats_users.insert(captures[1].to_string());
-            }
-            else if title_error_regex.is_match(&line) {
+            } else if title_error_regex.is_match(&line) {
                 title_errors += 1;
-            }
-            else if identifier_error_regex.is_match(&line) {
+            } else if identifier_error_regex.is_match(&line) {
                 identifier_errors += 1;
             }
         }

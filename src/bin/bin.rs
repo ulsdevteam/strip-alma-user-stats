@@ -11,8 +11,6 @@ use std::{
 };
 use structopt::StructOpt;
 
-mod alma;
-
 #[derive(StructOpt)]
 struct Options {
     #[structopt(short, long, default_value = "0")]

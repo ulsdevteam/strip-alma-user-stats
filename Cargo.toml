@@ -4,6 +4,14 @@ version = "0.1.0"
 authors = ["Chrysanthemum Lovelace <chrysanthemum@pitt.edu>"]
 edition = "2021"
 
+[lib]
+name = "alma"
+path = "src/lib.rs"
+
+[[bin]]
+name = "strip-alma-user-stats"
+path = "src/bin/bin.rs"
+
 [dependencies]
 anyhow = "1.0.53"
 dotenv = "0.15.0"
