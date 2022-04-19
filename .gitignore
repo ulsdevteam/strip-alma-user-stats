@@ -3,3 +3,5 @@ Cargo.lock
 .env
 *.txt
 *.log
+*.csv
+/users

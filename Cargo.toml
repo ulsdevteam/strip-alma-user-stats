@@ -14,6 +14,7 @@ path = "src/bin/bin.rs"
 
 [dependencies]
 anyhow = "1.0.53"
+csv = "1.1.6"
 dotenv = "0.15.0"
 env_logger = "0.9.0"
 governor = "0.4.2"
