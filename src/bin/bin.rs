@@ -31,42 +31,66 @@ async fn main() -> Result<()> {
     let alma_client = alma::Client::new(env::var("ALMA_REGION")?, env::var("ALMA_APIKEY")?);
     // Alma API page size
     const LIMIT: usize = 100;
-    // Each page will get its own concurrent task, handles to which will be collected here with their offset
-    let mut join_handles = Vec::new();
     // Get the first batch of user ids, along with the total user count
     let (user_ids, total_users) = alma_client.get_user_ids_and_total_count(options.from_offset * LIMIT, LIMIT).await?;
-    // Spawn a task for the first batch
-    info!("Spawning task for batch {}", options.from_offset);
-    join_handles.push((options.from_offset, tokio::spawn(handle_user_batch(alma_client.clone(), user_ids))));
     // Determine the last offset for this run
     let last_offset = options.to_offset.unwrap_or(total_users / LIMIT).min(total_users / LIMIT);
-    // Split up the rest of the users into batches
-    for offset in (options.from_offset + 1)..=last_offset {
-        let alma_client = alma_client.clone();
-        // Spawn a task for each batch
-        info!("Spawning task for batch {}", offset);
-        let join_handle = tokio::spawn(async move {
-            match alma_client.get_user_ids(offset * LIMIT, LIMIT).await {
-                Ok(user_ids) => handle_user_batch(alma_client, user_ids).await,
-                Err(error) => {
-                    error!("Failed to get user ids for batch {}: {:#}", offset, error);
-                    (0, 0)
+
+    #[cfg(feature = "concurrent")]
+    {
+        // Each page will get its own concurrent task, handles to which will be collected here with their offset
+        let mut join_handles = Vec::new();
+        // Spawn a task for the first batch
+        info!("Spawning task for batch {}", options.from_offset);
+        join_handles.push((options.from_offset, tokio::spawn(handle_user_batch(alma_client.clone(), user_ids))));
+        // Split up the rest of the users into batches
+        for offset in (options.from_offset + 1)..=last_offset {
+            let alma_client = alma_client.clone();
+            // Spawn a task for each batch
+            info!("Spawning task for batch {}", offset);
+            let join_handle = tokio::spawn(async move {
+                match alma_client.get_user_ids(offset * LIMIT, LIMIT).await {
+                    Ok(user_ids) => handle_user_batch(&alma_client, user_ids).await,
+                    Err(error) => {
+                        error!("Failed to get user ids for batch {}: {:#}", offset, error);
+                        (0, 0)
+                    }
                 }
+            });
+            join_handles.push((offset, join_handle));
+        }
+
+        // Yield to let some tasks run
+        tokio::task::yield_now().await;
+
+        for (offset, join_handle) in join_handles {
+            // Await each batch, and print any errors
+            match join_handle.await {
+                Ok((users_updated, errors)) => {
+
+                }
+                Err(join_error) => error!("Join error for batch {}: {}", offset, join_error),
             }
-        });
-        join_handles.push((offset, join_handle));
+        }
     }
 
-    // Yield to let some tasks run
-    tokio::task::yield_now().await;
-
-    for (offset, join_handle) in join_handles {
-        // Await each batch, and print any errors
-        match join_handle.await {
-            Ok((users_updated, errors)) => {
-                info!("Batch {}: {} users updated. {} errors.", offset, users_updated, errors);
-            }
-            Err(join_error) => error!("Join error for batch {}: {}", offset, join_error),
+    #[cfg(not(feature = "concurrent"))]
+    {
+        info!("Starting batch {}", options.from_offset);
+        let (users_updated, errors) = handle_user_batch(&alma_client, user_ids).await;
+        info!("Batch {}: {} users updated. {} errors.", options.from_offset, users_updated, errors);
+        for offset in (options.from_offset + 1)..=last_offset {
+            let (users_updated, errors) = match alma_client.get_user_ids(offset * LIMIT, LIMIT).await {
+                Ok(user_ids) => {
+                    info!("Starting batch {}", offset);
+                    handle_user_batch(&alma_client, user_ids).await
+                },
+                Err(error) => {
+                    error!("Failed to get user ids for batch {}: {:#}", offset, error);
+                        (0, 0)
+                }
+            };
+            info!("Batch {}: {} users updated. {} errors.", offset, users_updated, errors);
         }
     }
 
@@ -84,11 +108,11 @@ lazy_static! {
         read_lines_from_file(env::var("EXTERNAL_USER_GROUPS").unwrap()).collect();
 }
 
-async fn handle_user_batch(alma_client: alma::Client, user_ids: Vec<String>) -> (usize, usize) {
+async fn handle_user_batch(alma_client: &alma::Client, user_ids: Vec<String>) -> (usize, usize) {
     let mut users_updated = 0;
     let mut errors = 0;
     for user_id in user_ids {
-        match handle_user(&alma_client, &user_id).await {
+        match handle_user(alma_client, &user_id).await {
             Ok(true) => users_updated += 1,
             Ok(false) => (),
             Err(error) => {
