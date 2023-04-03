@@ -1,14 +1,6 @@
 use anyhow::Result;
-use json::JsonValue;
-use lazy_static::lazy_static;
-use log::{error, info, warn};
-use std::{
-    collections::HashSet,
-    env,
-    fs::File,
-    io::{BufRead, BufReader},
-    path::Path,
-};
+use log::{error, info};
+use std::env;
 use structopt::StructOpt;
 
 #[derive(StructOpt)]
@@ -66,9 +58,7 @@ async fn main() -> Result<()> {
         for (offset, join_handle) in join_handles {
             // Await each batch, and print any errors
             match join_handle.await {
-                Ok((users_updated, errors)) => {
-
-                }
+                Ok((users_updated, errors)) => {}
                 Err(join_error) => error!("Join error for batch {}: {}", offset, join_error),
             }
         }
@@ -84,10 +74,10 @@ async fn main() -> Result<()> {
                 Ok(user_ids) => {
                     info!("Starting batch {}", offset);
                     handle_user_batch(&alma_client, user_ids).await
-                },
+                }
                 Err(error) => {
                     error!("Failed to get user ids for batch {}: {:#}", offset, error);
-                        (0, 0)
+                    (0, 0)
                 }
             };
             info!("Batch {}: {} users updated. {} errors.", offset, users_updated, errors);
@@ -97,22 +87,11 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-fn read_lines_from_file(path: impl AsRef<Path>) -> impl Iterator<Item = String> {
-    BufReader::new(File::open(path.as_ref()).unwrap()).lines().map(|l| l.unwrap())
-}
-
-lazy_static! {
-    static ref CATEGORIES_TO_REMOVE: HashSet<String> =
-        read_lines_from_file(env::var("CATEGORIES_TO_REMOVE").unwrap()).collect();
-    static ref EXTERNAL_USER_GROUPS: HashSet<String> =
-        read_lines_from_file(env::var("EXTERNAL_USER_GROUPS").unwrap()).collect();
-}
-
 async fn handle_user_batch(alma_client: &alma::Client, user_ids: Vec<String>) -> (usize, usize) {
     let mut users_updated = 0;
     let mut errors = 0;
     for user_id in user_ids {
-        match handle_user(alma_client, &user_id).await {
+        match alma::handle_user(alma_client, &user_id).await {
             Ok(true) => users_updated += 1,
             Ok(false) => (),
             Err(error) => {
@@ -124,43 +103,11 @@ async fn handle_user_batch(alma_client: &alma::Client, user_ids: Vec<String>) ->
     (users_updated, errors)
 }
 
-async fn handle_user(alma_client: &alma::Client, user_id: &str) -> Result<bool> {
-    let mut user_details = alma_client.get_user_details(user_id).await?;
-    if let Some(title) = user_details["user_title"]["value"].as_str() {
-        user_details["user_title"]["value"] = JsonValue::String(title.to_uppercase());
-    }
-    let user_group = user_details["user_group"]["value"].as_str().unwrap_or("").to_owned();
-    if let JsonValue::Array(user_statistics) = &mut user_details["user_statistic"] {
-        let stats_count = user_statistics.len();
-        // Remove the categories
-        user_statistics.retain(|statistic| {
-            if let Some("Internal") = statistic["segment_type"].as_str() {
-                warn!("user {} (group {}) has internal statistic: {}", user_id, user_group, statistic);
-                if EXTERNAL_USER_GROUPS.contains(&user_group) {
-                    return false;
-                }
-            }
-            if let Some(category) = statistic["category_type"]["value"].as_str() {
-                // Retain if this category is not in the list
-                !CATEGORIES_TO_REMOVE.contains(category)
-            } else {
-                // If the category type is not present for some reason, just leave it as is
-                true
-            }
-        });
-        // If the count differs, the user was updated
-        if stats_count != user_statistics.len() {
-            alma_client.update_user_details(user_id, user_details).await?;
-            return Ok(true);
-        }
-    }
-
-    Ok(false)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use json::JsonValue;
+    use log::warn;
     use maplit::hashset;
 
     #[test]

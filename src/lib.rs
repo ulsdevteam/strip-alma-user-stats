@@ -1,10 +1,21 @@
 use anyhow::{anyhow, Result};
 use governor::{Jitter, Quota};
 use json::JsonValue;
-use log::debug;
+use lazy_static::lazy_static;
+use log::{debug, warn};
 use quick_xml::{events::Event, Reader};
 use reqwest::{Response, StatusCode};
-use std::{fmt, num::NonZeroU32, str, sync::Arc, time::Duration};
+use std::{
+    collections::HashSet,
+    env, fmt,
+    fs::File,
+    io::{BufRead, BufReader},
+    num::NonZeroU32,
+    path::Path,
+    str,
+    sync::Arc,
+    time::Duration,
+};
 use thiserror::Error;
 
 /// Client object for making Alma API calls. Uses `Arc` internally to be cheaply cloneable.
@@ -148,14 +159,14 @@ impl Client {
     /// Get a user's details as a JSON object
     pub async fn get_user_details(&self, user_id: &str) -> Result<JsonValue> {
         // Construct the url for the request
-        let url = self.data.base_url.join(&format!("users/{}", user_id))?;
+        let url = self.data.base_url.join(&format!("users/{}", user_id.replace("#", "%23")))?;
         self.get_user_details_impl(url).await
     }
 
     /// Get a user's details as a JSON object, including fee balance
     pub async fn get_user_details_with_fees(&self, user_id: &str) -> Result<JsonValue> {
         // Construct the url for the request
-        let url = self.data.base_url.join(&format!("users/{}?expand=fees", user_id))?;
+        let url = self.data.base_url.join(&format!("users/{}?expand=fees", user_id.replace("#", "%23")))?;
         self.get_user_details_impl(url).await
     }
 
@@ -177,7 +188,7 @@ impl Client {
     pub async fn update_user_details(&self, user_id: &str, user_details: JsonValue) -> Result<()> {
         self.until_ready().await;
         // Construct the url for the request
-        let mut url = self.data.base_url.join(&format!("users/{}", user_id))?;
+        let mut url = self.data.base_url.join(&format!("users/{}", user_id.replace("#", "%23")))?;
         debug!("PUT {}", url);
         url.query_pairs_mut().append_pair("apikey", &self.data.apikey);
         // Send the updated user
@@ -288,4 +299,63 @@ async fn check_error(response: Response) -> Result<Response> {
     } else {
         Ok(response)
     }
+}
+
+fn read_lines_from_file(path: impl AsRef<Path>) -> impl Iterator<Item = String> {
+    BufReader::new(File::open(path.as_ref()).unwrap()).lines().map(|l| l.unwrap())
+}
+
+lazy_static! {
+    static ref CATEGORIES_TO_REMOVE: HashSet<String> =
+        read_lines_from_file(env::var("CATEGORIES_TO_REMOVE").unwrap()).collect();
+    static ref EXTERNAL_USER_GROUPS: HashSet<String> =
+        read_lines_from_file(env::var("EXTERNAL_USER_GROUPS").unwrap()).collect();
+}
+
+pub async fn handle_user(alma_client: &Client, user_id: &str) -> Result<bool> {
+    let mut user_details = alma_client.get_user_details(user_id).await?;
+    if !user_details["user_title"].has_key("desc") {
+        warn!(
+            "user {} has a title ({}) with no description, removing it",
+            user_id, user_details["user_title"]["value"]
+        );
+        user_details.remove("user_title");
+    } else if let Some(title) = user_details["user_title"]["value"].as_str() {
+        user_details["user_title"]["value"] = JsonValue::String(title.to_uppercase());
+    }
+    for user_role in user_details["user_role"].members_mut() {
+        if let JsonValue::Array(parameters) = &mut user_role["parameter"] {
+            parameters.retain(|param| {
+                param["value"]["value"].as_str() != Some("DEFAULT_CIRC_DESK")
+                    && param["value"]["desc"].as_str() != Some("")
+            })
+        }
+    }
+    let user_group = user_details["user_group"]["value"].as_str().unwrap_or("").to_owned();
+    if let JsonValue::Array(user_statistics) = &mut user_details["user_statistic"] {
+        let stats_count = user_statistics.len();
+        // Remove the categories
+        user_statistics.retain(|statistic| {
+            if let Some("Internal") = statistic["segment_type"].as_str() {
+                if EXTERNAL_USER_GROUPS.contains(&user_group) {
+                    warn!("user {} (group {}) removing internal statistic: {}", user_id, user_group, statistic);
+                    return false;
+                }
+            }
+            if let Some(category) = statistic["category_type"]["value"].as_str() {
+                // Retain if this category is not in the list
+                !CATEGORIES_TO_REMOVE.contains(category)
+            } else {
+                // If the category type is not present for some reason, just leave it as is
+                true
+            }
+        });
+        // If the count differs, the user was updated
+        if stats_count != user_statistics.len() {
+            alma_client.update_user_details(user_id, user_details).await?;
+            return Ok(true);
+        }
+    }
+
+    Ok(false)
 }
