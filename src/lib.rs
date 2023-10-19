@@ -326,9 +326,9 @@ pub async fn handle_user(alma_client: &Client, user_id: &str) -> Result<bool> {
     for user_role in user_details["user_role"].members_mut() {
         if let JsonValue::Array(parameters) = &mut user_role["parameter"] {
             parameters.retain(|param| {
-                param["value"]["value"].as_str() != Some("DEFAULT_CIRC_DESK")
-                    && param["value"]["desc"].as_str() != Some("")
-            })
+                !(param["value"]["value"].as_str() == Some("DEFAULT_CIRC_DESK")
+                    && param["value"]["desc"].as_str() == Some(""))
+            });
         }
     }
     let user_group = user_details["user_group"]["value"].as_str().unwrap_or("").to_owned();
